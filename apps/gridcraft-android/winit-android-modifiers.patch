@@ -1,0 +1,44 @@
+--- a/src/platform_impl/android/mod.rs
++++ b/src/platform_impl/android/mod.rs
+@@ -143,6 +143,9 @@
+     cause: StartCause,
+     ignore_volume_keys: bool,
+     combining_accent: Option<char>,
++    /// The modifier keys as the last key event's meta state left them (WordCraft patch: winit
++    /// 0.30 never reports modifiers on Android, so Ctrl+Z typed a "z").
++    modifiers: crate::keyboard::ModifiersState,
+ }
+ 
+ #[derive(Debug, Clone, PartialEq)]
+@@ -192,6 +195,7 @@
+             cause: StartCause::Init,
+             ignore_volume_keys: attributes.ignore_volume_keys,
+             combining_accent: None,
++            modifiers: crate::keyboard::ModifiersState::empty(),
+         })
+     }
+ 
+@@ -434,6 +438,23 @@
+                         input_status = InputStatus::Unhandled
+                     },
+                     keycode => {
++                        // WordCraft patch: report Shift, Ctrl, Alt and Meta from the event's meta
++                        // state before the key itself, as the other platforms do.
++                        let meta = key.meta_state();
++                        let mut modifiers = crate::keyboard::ModifiersState::empty();
++                        modifiers.set(crate::keyboard::ModifiersState::SHIFT, meta.shift_on());
++                        modifiers.set(crate::keyboard::ModifiersState::CONTROL, meta.ctrl_on());
++                        modifiers.set(crate::keyboard::ModifiersState::ALT, meta.alt_on());
++                        modifiers.set(crate::keyboard::ModifiersState::SUPER, meta.meta_on());
++                        if modifiers != self.modifiers {
++                            self.modifiers = modifiers;
++                            let event = event::Event::WindowEvent {
++                                window_id: window::WindowId(WindowId),
++                                event: event::WindowEvent::ModifiersChanged(modifiers.into()),
++                            };
++                            callback(event, self.window_target());
++                        }
++
+                         let state = match key.action() {
+                             KeyAction::Down => event::ElementState::Pressed,
+                             KeyAction::Up => event::ElementState::Released,

@@ -691,9 +691,10 @@ fn save_as(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Outcom
             .labelled_by(label.id);
     });
     ui.add_space(14.0);
-    // Desktop: the system Save dialog. Web: the file downloads.
+    // Desktop: the system Save dialog. Web: the file downloads. Android hands the file to its own
+    // save picker through `download` too, but asks where like the desktop, so it says Browse.
     let web = app.services.pick_save.is_none() && app.services.download.is_some();
-    let label = if web { format!("{} (.{fmt})", lang.tr("Download")) } else { lang.tr("Browse…").to_string() };
+    let label = if web && !cfg!(target_os = "android") { format!("{} (.{fmt})", lang.tr("Download")) } else { lang.tr("Browse…").to_string() };
     if square_button(ui, Icon::OpenFolder, &label).clicked() && app.commit_edit(0, 0, false, false) {
         if fmt == "xlsx" {
             let before = app.session.active().map(|d| (d.path.clone(), d.is_dirty()));

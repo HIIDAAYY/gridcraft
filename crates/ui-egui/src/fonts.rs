@@ -64,6 +64,9 @@ pub fn system_font_dirs() -> Vec<PathBuf> {
             if let Some(l) = std::env::var_os("LOCALAPPDATA") {
                 dirs.push(PathBuf::from(l).join("Microsoft\\Windows\\Fonts"));
             }
+        } else if cfg!(target_os = "android") {
+            // The system's fonts, and those the device maker or a font app adds.
+            dirs.extend(["/system/fonts", "/product/fonts", "/system_ext/fonts", "/data/fonts/files"].map(Into::into));
         } else {
             dirs.extend(["/usr/share/fonts", "/usr/local/share/fonts", "/usr/share/fonts/TTF"].map(Into::into));
             if let Some(h) = &home {
