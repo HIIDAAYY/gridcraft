@@ -86,8 +86,10 @@ impl WorkCopies {
     }
 
     /// At start, before anything is open: delete the copies whose originals are up to date, and
-    /// folders the index doesn't know. Copies with changes their originals lack are kept.
-    pub fn tidy(&mut self) {
+    /// folders the index doesn't know. Copies with changes their originals lack are kept and
+    /// returned, so the app can open them again; one whose write-back never answered (the app
+    /// was closed meanwhile) counts as failed, and the next save tries again.
+    pub fn tidy(&mut self) -> Vec<(String, State)> {
         self.index.copies.retain(|path, e| {
             let keep = matches!(e.state, State::Conflict | State::Failed | State::Writing) && Path::new(path).is_file();
             if !keep {
@@ -95,6 +97,11 @@ impl WorkCopies {
             }
             keep
         });
+        for e in self.index.copies.values_mut() {
+            if e.state == State::Writing {
+                e.state = State::Failed;
+            }
+        }
         let kept: Vec<PathBuf> = self.index.copies.keys().filter_map(|p| Path::new(p).parent().map(Path::to_path_buf)).collect();
         if let Ok(entries) = std::fs::read_dir(&self.root) {
             for dir in entries.flatten().map(|e| e.path()) {
@@ -107,6 +114,21 @@ impl WorkCopies {
         }
         for (path, e) in &self.index.copies {
             log::warn!("working copies: {path} still has changes its original ({}) lacks: {:?}", e.uri, e.state);
+        }
+        self.store();
+        self.index.copies.iter().map(|(p, e)| (p.clone(), e.state)).collect()
+    }
+
+    /// Drop the copy at `path` and its folder: its workbook was saved elsewhere (Save As), or
+    /// closed after the user was told its original couldn't take the changes.
+    pub fn forget(&mut self, path: &str) {
+        if self.index.copies.remove(path).is_none() {
+            return;
+        }
+        if let Some(dir) = Path::new(path).parent().filter(|d| d.starts_with(&self.root) && *d != self.root)
+            && let Err(e) = std::fs::remove_dir_all(dir)
+        {
+            log::warn!("working copies: cannot remove {}: {e}", dir.display());
         }
         self.store();
     }
@@ -269,11 +291,30 @@ mod tests {
         std::fs::create_dir_all(dir.join("docs/stray")).unwrap();
 
         let mut again = WorkCopies::load(dir.join("docs"), dir.join("index.json"));
-        again.tidy();
+        assert_eq!(again.tidy(), vec![(open[0].clone(), State::Conflict)], "the kept copy is reported, to open again");
         assert_eq!(again.state(&open[0]), Some(State::Conflict), "the changes are kept");
         assert!(path.is_file());
         assert!(!synced.exists() && again.state(&synced.to_string_lossy()).is_none(), "an up-to-date copy is cleared");
         assert!(!dir.join("docs/stray").exists(), "unknown folders are cleared");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_unanswered_write_is_retried_after_a_restart_and_forgetting_removes_the_copy() {
+        let dir = temp("unanswered");
+        let mut w = WorkCopies::load(dir.join("docs"), dir.join("index.json"));
+        let path = w.create("B.xlsx", b"one", "content://a/1").unwrap();
+        let open = vec![path.to_string_lossy().into_owned()];
+        touch(&path, b"two");
+        assert_eq!(w.saved(&open).len(), 1, "handed over; the app closes before the answer");
+
+        let mut again = WorkCopies::load(dir.join("docs"), dir.join("index.json"));
+        assert_eq!(again.tidy(), vec![(open[0].clone(), State::Failed)]);
+        touch(&path, b"three");
+        assert_eq!(again.saved(&open).len(), 1, "the next save tries again instead of waiting forever");
+        again.forget(&open[0]);
+        assert!(!path.exists() && again.state(&open[0]).is_none());
+        again.forget(&open[0]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

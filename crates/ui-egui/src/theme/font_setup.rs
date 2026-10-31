@@ -276,9 +276,22 @@ pub(super) fn candidates(role: &str) -> Vec<(String, u32)> {
     let win = std::env::var("WINDIR").map(|w| format!("{w}\\Fonts")).unwrap_or_else(|_| "C:\\Windows\\Fonts".into());
     // ChromeOS's Linux container (Crostini) mounts the host's fonts under `chromeos/` (#1762).
     let lin = ["/usr/share/fonts/truetype", "/usr/share/fonts", "/usr/local/share/fonts", "/usr/share/fonts/TTF", "/usr/share/fonts/chromeos"];
+    // Android: Source Sans Pro (regular, semibold, bold and italics) and Noto Serif ship with every
+    // device as static faces; Roboto, the system's own face, is one variable file egui draws only
+    // at its default weight, so it would show no bold.
+    let android = cfg!(target_os = "android");
+    let droid = "/system/fonts";
     let mut v: Vec<(String, u32)> = Vec::new();
     let mut add = |s: String, i: u32| v.push((s, i));
     match role {
+        "ui" if android => add(format!("{droid}/SourceSansPro-Regular.ttf"), 0),
+        "ui-bold" if android => add(format!("{droid}/SourceSansPro-SemiBold.ttf"), 0),
+        "cell" if android => add(format!("{droid}/SourceSansPro-Regular.ttf"), 0),
+        "cell-bold" if android => add(format!("{droid}/SourceSansPro-Bold.ttf"), 0),
+        "cell-italic" if android => add(format!("{droid}/SourceSansPro-Italic.ttf"), 0),
+        "cell-bold-italic" if android => add(format!("{droid}/SourceSansPro-BoldItalic.ttf"), 0),
+        "serif" if android => add(format!("{droid}/NotoSerif-Regular.ttf"), 0),
+        "mono" if android => add(format!("{droid}/DroidSansMono.ttf"), 0),
         "ui" => {
             add(format!("{mac_sys}/SFNS.ttf"), 0);
             add(format!("{mac_sys}/HelveticaNeue.ttc"), 0);

@@ -12,7 +12,7 @@ use serde_json::json;
 use winit::platform::android::activity::AndroidApp;
 
 use crate::mailbox::{self, Message, Outcome, Purpose};
-use crate::workcopies::{Notice, WorkCopies};
+use crate::workcopies::{Notice, State, WorkCopies};
 use crate::{bridge, keys, touch::Touches};
 
 /// The app's private folders (under `Context.getFilesDir()`, the same folders the Java side uses).
@@ -124,7 +124,17 @@ struct Shell {
     light_bars: Option<bool>,
     copies: WorkCopies,
     saves: Rc<RefCell<Saves>>,
+    /// The working copies open in the last frame, to notice one being closed.
+    open_copies: Vec<String>,
+    /// Whether egui-winit's own clipboard holds [`PASTE_SEED`] yet.
+    seeded: bool,
 }
+
+/// What egui-winit's own clipboard holds so a hardware keyboard's Ctrl+V reaches the app.
+/// egui-winit can't read Android's clipboard: it turns Ctrl+V into a paste of its own copy, and
+/// into nothing at all while that copy is empty. Seeded with this invisible character, every
+/// Ctrl+V arrives as a paste, whose text the shell then takes from the system clipboard.
+const PASTE_SEED: &str = "\u{2063}";
 
 impl Shell {
     fn new(ctx: &egui::Context, dirs: Dirs) -> Self {
@@ -158,7 +168,13 @@ impl Shell {
         SheetApp::setup_context_for_language(ctx, app.ui.dark, app.ui.language);
         app.after_engine();
         let mut copies = WorkCopies::load(dirs.docs.clone(), dirs.profile.join("workcopies.json"));
-        copies.tidy();
+        let kept = copies.tidy();
+        // A workbook whose changes its own file lacks (another app changed the file, or writing
+        // failed) opens again, as it was left, with the reason on the notice bar.
+        for (path, state) in &kept {
+            app.open_path(path);
+            app.notice = Some(not_saved_notice(path, *state));
+        }
         watch_inbox(dirs.inbox.clone(), ctx.clone());
         Self {
             app,
@@ -176,6 +192,8 @@ impl Shell {
             light_bars: None,
             copies,
             saves,
+            open_copies: kept.into_iter().map(|(p, _)| p).collect(),
+            seeded: false,
         }
     }
 
@@ -213,6 +231,7 @@ impl Shell {
                 Message::Synced { path, outcome } => match self.copies.answered(&path, outcome) {
                     Notice::None => {}
                     Notice::Conflict(name) => {
+                        self.app.notice = Some(not_saved_notice(&path, State::Conflict));
                         self.app.message = Some((
                             "GridCraft".into(),
                             format!(
@@ -222,6 +241,7 @@ impl Shell {
                         ));
                     }
                     Notice::Failed(name, reason) => {
+                        self.app.notice = Some(not_saved_notice(&path, State::Failed));
                         self.app.message = Some((
                             "GridCraft".into(),
                             format!(
@@ -280,12 +300,21 @@ impl Shell {
                 return;
             }
         };
+        let old = self.app.session.documents().get(index).and_then(|d| d.path.clone());
         let active = self.app.session.active_index();
         self.app.session.set_active(index);
         let saved = self.app.session.run("file.save", json!({"path": path.to_string_lossy()}));
         self.app.session.set_active(active);
         match saved {
-            Ok(_) => self.copies.link(&path, uri),
+            Ok(_) => {
+                self.copies.link(&path, uri);
+                // The workbook's old working copy (and a warning that its file lacked the
+                // changes) is done with: the changes are in the new file.
+                if let Some(old) = old.filter(|p| self.copies.contains(p)) {
+                    self.copies.forget(&old);
+                    self.app.notice = None;
+                }
+            }
             Err(e) => log::warn!("{name} saved, but the workbook keeps its old file: {e}"),
         }
         self.app.after_engine();
@@ -295,6 +324,15 @@ impl Shell {
     /// which workbook a save just started is a copy of; keep Recent to files this device can open.
     fn after_app(&mut self) {
         let open: Vec<String> = self.app.session.documents().iter().filter_map(|d| d.path.clone()).collect();
+        // A workbook closed while its own file lacks its changes: the user was told (and could
+        // Save As), so its copy goes rather than coming back at every start.
+        for closed in std::mem::take(&mut self.open_copies).into_iter().filter(|p| !open.contains(p)) {
+            if matches!(self.copies.state(&closed), Some(State::Conflict | State::Failed)) {
+                log::info!("working copies: {closed} closed without its changes reaching its file");
+                self.copies.forget(&closed);
+            }
+        }
+        self.open_copies = open.iter().filter(|p| self.copies.contains(p)).cloned().collect();
         for (path, uri) in self.copies.saved(&open) {
             if let Err(e) = bridge::write_back(&path, &uri) {
                 log::warn!("write back {path}: {e}");
@@ -386,13 +424,18 @@ impl eframe::App for Shell {
                 egui::Event::Key { key: key @ egui::Key::BrowserBack, .. } => *key = egui::Key::Escape,
                 // Paste takes the system clipboard (another app's copy), when it has text.
                 egui::Event::Paste(text) => {
-                    if let Some(system) = read_text(&self.dirs.clipboard) {
-                        *text = system;
+                    match read_text(&self.dirs.clipboard) {
+                        Some(system) => *text = system,
+                        // Nothing on the system clipboard: never paste the seed.
+                        None if text.as_str() == PASTE_SEED => text.clear(),
+                        None => {}
                     }
                 }
                 _ => {}
             }
         }
+        // Ctrl+V with nothing on the clipboard pastes nothing (rather than an empty cell).
+        raw.events.retain(|e| !matches!(e, egui::Event::Paste(text) if text.is_empty()));
         if self.touches.process(raw) {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
@@ -434,7 +477,7 @@ impl eframe::App for Shell {
         });
         let (typing_area, copied) = ui.ctx().output(|o| {
             let copied = o.commands.iter().rev().find_map(|c| match c {
-                egui::OutputCommand::CopyText(t) if !t.is_empty() => Some(t.clone()),
+                egui::OutputCommand::CopyText(t) if !t.is_empty() && t != PASTE_SEED => Some(t.clone()),
                 _ => None,
             });
             (o.ime.as_ref().map(|ime| ime.rect), copied)
@@ -447,6 +490,10 @@ impl eframe::App for Shell {
         {
             log::warn!("clipboard: {e}");
         }
+        if !self.seeded {
+            self.seeded = true;
+            ui.ctx().copy_text(PASTE_SEED.to_string());
+        }
         self.keyboard_follows(&ui.ctx().clone(), typing_area, released, now);
         self.after_app();
     }
@@ -457,6 +504,18 @@ impl eframe::App for Shell {
         }
         self.store_prefs();
     }
+}
+
+/// The notice bar for a workbook whose own file lacks its saved changes (`state`: conflict or
+/// failed), with Save As at hand.
+fn not_saved_notice(path: &str, state: State) -> gridcraft_ui_egui::Notice {
+    let name = Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let text = if state == State::Conflict {
+        format!("Not saved to “{name}”: another app changed that file. Your changes are kept here; save them with Save As.")
+    } else {
+        format!("Not saved to “{name}” yet: writing to that file failed. Save again, or keep a copy with Save As.")
+    };
+    gridcraft_ui_egui::Notice { text, kind: gridcraft_ui_egui::NoticeKind::Warning, action: Some(("Save As…".into(), "saveAs".into())) }
 }
 
 /// A small text file (preferences, the clipboard mirror), if it exists and is under 16 MB.

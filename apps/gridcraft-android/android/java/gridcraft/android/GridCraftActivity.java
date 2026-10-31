@@ -118,6 +118,12 @@ public class GridCraftActivity extends NativeActivity {
             // the window. Only the app decides whether it shows.
             if (!keyboardWanted) {
                 setKeyboardVisible(false);
+                // Android may bring the keyboard back for the text field a moment later.
+                getWindow().getDecorView().postDelayed(() -> {
+                    if (!keyboardWanted) {
+                        setKeyboardVisible(false);
+                    }
+                }, 250);
             }
         }
     }
@@ -256,6 +262,11 @@ public class GridCraftActivity extends NativeActivity {
                 return;
             }
             if (visible) {
+                // The text field takes focus only while the app wants the keyboard: a focused
+                // text field brings the keyboard back whenever the window regains focus (after a
+                // picker or another app), with nothing to type into.
+                textInput.setFocusable(true);
+                textInput.setFocusableInTouchMode(true);
                 textInput.requestFocus();
                 // Bind the keyboard to the text field afresh: after another window (a picker) had
                 // the keyboard, Android can show it again still bound to that window's connection,
@@ -264,6 +275,9 @@ public class GridCraftActivity extends NativeActivity {
                 imm.showSoftInput(textInput, 0);
             } else {
                 imm.hideSoftInputFromWindow(textInput.getWindowToken(), 0);
+                textInput.clearFocus();
+                textInput.setFocusable(false);
+                textInput.setFocusableInTouchMode(false);
             }
         });
     }
@@ -723,8 +737,9 @@ public class GridCraftActivity extends NativeActivity {
         TextInput(GridCraftActivity activity) {
             super(activity);
             this.activity = activity;
-            setFocusable(true);
-            setFocusableInTouchMode(true);
+            // Focusable only while the app shows the keyboard (setKeyboardVisible).
+            setFocusable(false);
+            setFocusableInTouchMode(false);
         }
 
         @Override
