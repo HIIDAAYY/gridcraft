@@ -61,7 +61,9 @@ pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_
             // A search narrows the list; Select All and Apply then only cover the matches.
             let mut search: String = ui.ctx().data_mut(|d| d.get_temp(search_key)).unwrap_or_default();
             let field = ui.add(egui::TextEdit::singleline(&mut search).hint_text("Search").desired_width(f32::INFINITY));
-            if !was_open {
+            // On a touch screen the search box waits for a tap: focused at once, it would bring up
+            // the on-screen keyboard over the list.
+            if !was_open && !ui.input(|i| i.has_touch_screen()) {
                 field.request_focus();
             }
             let needle = search.trim().to_lowercase();

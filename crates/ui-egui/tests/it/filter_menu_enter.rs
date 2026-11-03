@@ -27,6 +27,7 @@ fn filter_menu_open() -> Harness {
     h.run_steps(4);
     key(&mut h, Key::ArrowDown, Modifiers::ALT);
     assert!(h.state().grid.filter_menu.is_some(), "Alt+Down opens the filter menu");
+    assert!(h.ctx.text_edit_focused(), "with a mouse the search box takes typing at once");
     h
 }
 
@@ -84,4 +85,30 @@ fn enter_with_nothing_checked_keeps_the_menu_open() {
     assert_eq!(hidden(&h), [false, false, false], "an empty selection must not hide every row");
     assert!(h.state().grid.filter_menu.is_some(), "the menu stays open");
     assert_eq!(active(&h), "A1");
+}
+
+#[test]
+fn on_a_touch_screen_the_search_box_waits_for_a_tap() {
+    let mut session = Session::new();
+    session.new_workbook();
+    session.execute("range.setValues", json!({"range": "A1", "values": [["Fruit"], ["Apple"], ["Banana"]]})).unwrap();
+    session.execute("data.filter", json!({"range": "A1:A3"})).unwrap();
+    session.execute("selection.set", json!({"cell": "A1"})).unwrap();
+    let mut h = crate::common::builder().with_size(egui::vec2(1200.0, 800.0)).build_ui_state(
+        |ui, app: &mut SheetApp| {
+            app.logic(ui.ctx());
+            app.ui(ui);
+        },
+        crate::common::app(session),
+    );
+    h.run_steps(4);
+    // A finger has touched the screen: egui now knows it has one.
+    let at = egui::pos2(600.0, 700.0);
+    for phase in [egui::TouchPhase::Start, egui::TouchPhase::End] {
+        h.input_mut().events.push(Event::Touch { device_id: egui::TouchDeviceId(0), id: egui::TouchId(1), phase, pos: at, force: None });
+    }
+    h.run_steps(2);
+    key(&mut h, Key::ArrowDown, Modifiers::ALT);
+    assert!(h.state().grid.filter_menu.is_some(), "the menu opens");
+    assert!(!h.ctx.text_edit_focused(), "no text field focused, so no on-screen keyboard over the list");
 }

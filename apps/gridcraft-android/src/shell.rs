@@ -109,13 +109,16 @@ struct Shell {
     waiting: Rc<Cell<u32>>,
     /// The keyboard as last asked of the activity.
     keyboard: bool,
-    /// Where the last tap or press began.
-    press: Option<egui::Pos2>,
-    /// When (seconds, egui's clock) and where the last tap ended: a text field that takes the
-    /// keyboard's focus soon after, under that tap (double-tap on a cell, a tap on the formula
-    /// bar or a box), shows the on-screen keyboard. A field the app focuses by itself (a filter
-    /// menu's search box) doesn't.
-    tapped_at: Option<(f64, egui::Pos2)>,
+    /// Where the last tap or press began, and whether File view was open then.
+    press: Option<(egui::Pos2, bool)>,
+    /// When (seconds, egui's clock) and where the last tap ended, and whether File view was open
+    /// then: a text field that takes the keyboard's focus soon after (double-tap on a cell, a tap
+    /// on the formula bar, Rename in a sheet tab's menu) shows the on-screen keyboard. In File
+    /// view only a tap on the field itself does (its pages focus fields as they open).
+    tapped_at: Option<(f64, egui::Pos2, bool)>,
+    /// Enter or Tab was pressed while a cell was being edited, and the keyboard hasn't been
+    /// settled on since (the edit may end a frame later).
+    moved_on: bool,
     /// Enter or Tab ended a cell's edit: the keyboard stays up for the next cell, as in Excel,
     /// until a tap elsewhere.
     entering: bool,
@@ -199,6 +202,7 @@ impl Shell {
             keyboard: false,
             press: None,
             tapped_at: None,
+            moved_on: false,
             entering: false,
             cell_editing: false,
             ribbon_before_keyboard: None,
@@ -416,17 +420,25 @@ impl Shell {
     /// cell's edit (the next cell takes typing, as in Excel); put it away when nothing takes
     /// typing. While it is up for cells, the ribbon folds away to leave the sheet room.
     fn keyboard_follows(&mut self, ctx: &egui::Context, typing_area: Option<egui::Rect>, released: bool, now: f64) {
-        if released && let Some(pos) = self.press.take() {
-            self.tapped_at = Some((now, pos));
+        if released && let Some((pos, file_view)) = self.press.take() {
+            self.tapped_at = Some((now, pos, file_view));
         }
-        let tapped_in = |area: egui::Rect| self.tapped_at.is_some_and(|(t, pos)| now - t < 0.8 && area.expand(8.0).contains(pos));
-        let (moved_on, pressed) = ctx.input(|i| {
-            let moved_on = i.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::Enter | egui::Key::Tab, pressed: true, .. }));
-            (moved_on, i.pointer.any_pressed())
+        let tapped_in =
+            |area: egui::Rect| self.tapped_at.is_some_and(|(t, pos, file_view)| now - t < 0.8 && (!file_view || area.expand(8.0).contains(pos)));
+        let (enter_or_tab, pressed) = ctx.input(|i| {
+            let keys = i.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::Enter | egui::Key::Tab, pressed: true, .. }));
+            (keys, i.pointer.any_pressed())
         });
+        if enter_or_tab && (self.cell_editing || self.app.editor.is_some()) {
+            self.moved_on = true;
+        }
+        if pressed {
+            self.moved_on = false;
+        }
         match typing_area {
             None => {
-                if self.keyboard && self.cell_editing && moved_on && !pressed && self.app.backstage.is_none() {
+                if self.keyboard && self.moved_on && self.app.backstage.is_none() {
+                    self.moved_on = false;
                     self.entering = true;
                 } else if self.keyboard && (!self.entering || pressed || self.app.backstage.is_some()) {
                     self.keyboard = false;
@@ -437,6 +449,9 @@ impl Shell {
                 }
             }
             Some(area) => {
+                if self.app.editor.is_none() {
+                    self.moved_on = false;
+                }
                 self.entering = false;
                 let tapped = tapped_in(area);
                 if tapped && !self.keyboard {
@@ -468,7 +483,7 @@ impl Shell {
             }
             _ => {}
         }
-        if self.tapped_at.is_some_and(|(t, _)| now - t < 0.8) {
+        if self.tapped_at.is_some_and(|(t, _, _)| now - t < 0.8) {
             // A field may take focus a frame or two after the tap (a double-tap starts editing).
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
@@ -524,7 +539,7 @@ impl eframe::App for Shell {
         let (pressed_at, released, now) =
             ui.ctx().input(|i| (i.pointer.any_pressed().then(|| i.pointer.press_origin()).flatten(), i.pointer.any_released(), i.time));
         if let Some(pos) = pressed_at {
-            self.press = Some(pos);
+            self.press = Some((pos, self.app.backstage.is_some()));
         }
         // Android draws the app under the status bar, the navigation bar and the keyboard: run it
         // in the part of the window they leave free (`content_rect`, from the insets), over the

@@ -63,7 +63,9 @@ pub(super) fn touch_grabs(app: &SheetApp, geo: &Geo, sh: &Sheet) -> Vec<(Rect, O
     let corner = geo.range_rect(sh, sel.current()).right_bottom();
     let in_view = geo.range_panes(RangeRef::cell(sel.current().end)).iter().any(|r| r.expand(1.0).contains(corner));
     if in_view {
-        let area = geo.mirror_rect(Rect::from_center_size(corner, vec2(FINGER_REACH * 2.0, FINGER_REACH * 2.0))).intersect(geo.cells);
+        // Mostly outside the cell: a filter button sits in the cell's bottom-right corner.
+        let area = Rect::from_min_max(corner - vec2(2.0, 2.0), corner + vec2(FINGER_REACH, FINGER_REACH));
+        let area = geo.mirror_rect(area).intersect(geo.cells);
         // The press lands on the handle itself, so the grid starts a fill rather than a selection.
         grabs.push((area, Some(geo.mirror_pos(corner))));
     }

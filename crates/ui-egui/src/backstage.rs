@@ -383,8 +383,10 @@ fn recent_list(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Ou
     let width = ui.available_width().min(CONTENT_W);
     // What the file system has said so far; the rest arrives in later frames (see `RecentFiles`).
     let known = bs.recent.known(ui.ctx(), &app.ui.recent);
-    // The web build has no files to ask about, and a narrow window leaves the names their room.
-    let modified_w = if cfg!(target_arch = "wasm32") || width < 420.0 { 0.0 } else { MODIFIED_W };
+    // The web build has no files to ask about, a narrow window leaves the names their room, and
+    // document addresses (Android) have no file here to ask about.
+    let only_documents = app.services.place.as_ref().is_some_and(|place| app.ui.recent.iter().take(limit).all(|p| place(p).is_some()));
+    let modified_w = if cfg!(target_arch = "wasm32") || width < 420.0 || only_documents { 0.0 } else { MODIFIED_W };
     if modified_w > 0.0 {
         let (head, _) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
         ui.painter().text(
