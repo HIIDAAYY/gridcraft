@@ -1,4 +1,6 @@
 #[cfg(test)]
+use super::CellRef;
+#[cfg(test)]
 use super::Trace;
 use super::cursor::update_cursor;
 use super::editor::{in_cell_editor, list_picker, validation_arrow};
@@ -9,12 +11,10 @@ use super::quadrant::{QuadrantPaint, mirror_painted, paint_quadrant};
 use super::selection::{SelectionPaintInput, paint_selection};
 use super::tables::{TableHeading, paint_filter_button, table_headings};
 use super::{
-    Align2, Arc, CfCache, Color32, DISPLAY_SCALE, Drag, MAX_COLS, MAX_ROWS, Painter, PaneQuad, RangeRef, Rect, Sense, Sheet, SheetApp, Stroke,
+    Align2, Arc, CfCache, Color32, DISPLAY_SCALE, Drag, MAX_COLS, MAX_ROWS, Painter, PaneQuad, Pos2, RangeRef, Rect, Sense, Sheet, SheetApp, Stroke,
     StrokeKind, Tokens, WHEEL_ZOOM_IDLE, WheelZoom, Workbook, col_to_letters, heading_font_size, json, pos2, theme, vec2, wheel_zoom_step,
     zoom_glide_step,
 };
-#[cfg(test)]
-use super::{CellRef, Pos2};
 
 pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
@@ -70,6 +70,8 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
                 zooming.notches = (zooming.notches + turned).clamp(-32.0, 32.0);
             }
             zooming.time = now;
+            // A pinch zooms about the fingers; the wheel keeps the top-left cell.
+            zooming.focus = ui.input(|i| i.multi_touch().map(|m| m.center_pos));
             // A notch steps once 60% of it has turned, and the rest of it brings `notches` back to
             // about 0. (Past half, so what's left after a step can't step back.) Steps count from
             // where a glide is going, not from where it has got to.
@@ -114,7 +116,11 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
         }
         view.scroll -= d / z;
     }
-    update_zoom_glide(app, ui, place, sh.zoom, now);
+    let split = (!paper).then(|| {
+        let g = make_geo(app, view.scroll);
+        g.cells.min + egui::vec2(g.frozen_w, g.frozen_h)
+    });
+    update_zoom_glide(app, ui, place, sh.zoom, now, split.map(|s| (&mut view.scroll, s, sh.right_to_left)));
     view.scroll = view.scroll.max(egui::Vec2::ZERO);
     let (mut max_x, mut max_y) = (sh.col_left(MAX_COLS - 20) as f32, sh.row_top(MAX_ROWS - 40) as f32);
     if paper {
@@ -338,6 +344,7 @@ fn show_grid_interactions(app: &mut SheetApp, ui: &mut egui::Ui, resp: &egui::Re
         interact(app, ui, resp, geo, sh, wb);
     }
     update_cursor(app, ui, resp, geo, sh);
+    app.touch_grabs = super::cursor::touch_grabs(app, geo, sh);
     crate::text_box::show(app, ui, geo, sh);
     if app.editor.as_ref().is_some_and(|e| !e.from_formula_bar) {
         in_cell_editor(app, ui, geo, sh, wb);
@@ -352,12 +359,17 @@ fn show_grid_interactions(app: &mut SheetApp, ui: &mut egui::Ui, resp: &egui::Re
     error_check_tag(app, ui, geo, sh);
 }
 
-fn update_zoom_glide(app: &mut SheetApp, ui: &egui::Ui, place: (u64, usize), zoom: u16, now: f64) {
+/// `anchor`: the scroll, the scrolling pane's top-left on screen and whether the sheet runs right
+/// to left, so a pinch keeps the sheet under the fingers (Normal view).
+fn update_zoom_glide(app: &mut SheetApp, ui: &egui::Ui, place: (u64, usize), zoom: u16, now: f64, anchor: Option<(&mut egui::Vec2, Pos2, bool)>) {
     let mut zooming = WheelZoom::at(app, place, zoom, now);
     if let Some((to, shown)) = zooming.glide {
         let glides = app.ui.animations && ui.ctx().global_style().animation_time > 0.0 && !app.shots.in_flight();
         let share = egui::emath::exponential_smooth_factor(0.9, 0.1, ui.input(|i| i.stable_dt).min(0.1));
         let z = if glides { zoom_glide_step(shown, to, share) } else { to };
+        if let (Some(focus), Some((scroll, origin, rtl))) = (zooming.focus, anchor) {
+            *scroll += pinch_scroll(focus - origin, zoom, z, rtl);
+        }
         let _ = app.session.run("view.zoom", json!({"percent": z}));
         zooming.glide = (z != to).then_some((to, z));
         ui.ctx().request_repaint();
@@ -365,6 +377,21 @@ fn update_zoom_glide(app: &mut SheetApp, ui: &egui::Ui, place: (u64, usize), zoo
     if app.grid.wheel_zoom.is_some_and(|w| w.glide.is_some()) {
         app.grid.wheel_zoom = Some(zooming);
     }
+}
+
+/// How far the scroll (sheet units) moves when the zoom goes from `from` to `to` percent, so the
+/// point `at` (screen points from the scrolling pane's top-left) stays under the fingers.
+fn pinch_scroll(at: egui::Vec2, from: u16, to: u16, rtl: bool) -> egui::Vec2 {
+    let (z0, z1) = (f32::from(from.max(1)) / 100.0 * DISPLAY_SCALE, f32::from(to.max(1)) / 100.0 * DISPLAY_SCALE);
+    if !(at.x.is_finite() && at.y.is_finite()) || at.x < 0.0 || at.y < 0.0 {
+        return egui::Vec2::ZERO;
+    }
+    let mut d = at / z0 - at / z1;
+    // A mirrored sheet's columns run the other way from the screen: keep its columns as they are.
+    if rtl {
+        d.x = 0.0;
+    }
+    d
 }
 
 /// Normal view: up to four panes (frozen rows/columns), each painted with its own clip.
@@ -818,6 +845,27 @@ fn paint_pages(app: &mut SheetApp, p: &Painter, geo: &Geo, sh: &Sheet) {
         );
     }
     p.rect_stroke(pr, 0.0, Stroke::new(3.0, blue), StrokeKind::Outside);
+}
+
+#[cfg(test)]
+mod pinch_tests {
+    use super::pinch_scroll;
+
+    #[test]
+    fn a_pinch_keeps_the_sheet_under_the_fingers() {
+        // Fingers 200 points into the pane: doubling the zoom moves the scroll half that far (in
+        // sheet units at the old zoom), so the same sheet point stays under them.
+        let at = egui::vec2(200.0, 100.0);
+        let d = pinch_scroll(at, 100, 200, false);
+        let z0 = super::DISPLAY_SCALE;
+        let z1 = 2.0 * super::DISPLAY_SCALE;
+        assert!(((at.x / z0) - (d.x + at.x / z1)).abs() < 1e-3);
+        assert!(((at.y / z0) - (d.y + at.y / z1)).abs() < 1e-3);
+        assert!(pinch_scroll(at, 200, 100, false).x < 0.0, "zooming out scrolls back");
+        assert_eq!(pinch_scroll(at, 100, 200, true).x, 0.0, "a mirrored sheet keeps its columns");
+        assert_eq!(pinch_scroll(egui::vec2(-5.0, 10.0), 100, 200, false), egui::Vec2::ZERO, "outside the pane: no move");
+        assert_eq!(pinch_scroll(egui::vec2(f32::NAN, 10.0), 0, 200, false), egui::Vec2::ZERO);
+    }
 }
 
 #[cfg(test)]

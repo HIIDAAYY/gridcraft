@@ -11,6 +11,8 @@
 //! - **long press, then drag**: the mouse button held down, so dragging selects cells (the raw
 //!   touches are held back meanwhile: the grid pans the sheet on any touch drag, which here would
 //!   undo the selection);
+//! - **a finger on a grab area** (the selected chart or picture, the fill handle: [`Touches::grabs`]):
+//!   the mouse button at once, so the object moves (or the fill runs) with the finger;
 //! - **two fingers**: egui's pinch zoom (the touch events pass through untouched); lifting both
 //!   without moving is a right-click, for the context menu.
 //!
@@ -62,6 +64,9 @@ pub struct Touches {
     modifiers: Modifiers,
     /// The touch device the fingers are on (for the cancel that ends a held finger's touch).
     device: egui::TouchDeviceId,
+    /// Where a finger takes hold at once instead of scrolling, and where the press then lands
+    /// (`None`: under the finger). The app says, each frame.
+    pub grabs: Vec<(egui::Rect, Option<Pos2>)>,
 }
 
 impl Default for Touches {
@@ -74,6 +79,7 @@ impl Default for Touches {
             last_time: 0.0,
             modifiers: Modifiers::NONE,
             device: egui::TouchDeviceId(0),
+            grabs: Vec::new(),
         }
     }
 }
@@ -150,11 +156,22 @@ impl Touches {
             TouchPhase::Start => {
                 self.down.retain(|(d, _)| *d != id);
                 self.down.push((id, pos));
+                // Where the press lands if the finger is on a grab area.
+                let grab = self.grabs.iter().find(|(area, _)| area.contains(pos)).map(|(_, aim)| *aim);
                 // A new finger stops a coasting flick where it is.
                 if self.fling.take().is_some() {
                     out.push(wheel(Vec2::ZERO, TouchPhase::End, modifiers));
                 }
                 match self.state {
+                    State::Idle if grab.is_some() => {
+                        // On something to drag: hold the button now (as a long press would), and
+                        // end the touch egui saw land so the grid doesn't pan with it.
+                        let at = grab.flatten().unwrap_or(pos);
+                        out.push(Event::Touch { device_id: self.device, id, phase: TouchPhase::Cancel, pos, force: None });
+                        out.push(Event::PointerMoved(at));
+                        out.push(button(at, PointerButton::Primary, true, modifiers));
+                        self.state = State::Pressing { id };
+                    }
                     State::Idle => {
                         // Hover there, so a swipe scrolls what is under the finger.
                         out.push(Event::PointerMoved(pos));
@@ -248,9 +265,13 @@ impl Touches {
                             if !cancelled && !moved && now - since <= TWO_FINGER_TAP {
                                 out.push(Event::PointerMoved(first));
                                 out.push(button(first, PointerButton::Secondary, true, modifiers));
+                                // The pointer stays there after the release: a response's
+                                // `secondary_clicked` (a sheet tab's menu) needs it still over the
+                                // widget in the frame the button comes up.
                                 self.next.push(button(first, PointerButton::Secondary, false, modifiers));
+                            } else {
+                                self.next.push(Event::PointerGone);
                             }
-                            self.next.push(Event::PointerGone);
                             self.state = State::Idle;
                         }
                     }
@@ -410,6 +431,45 @@ mod tests {
         all.extend(frame(&mut t, 0.12, finger(0, TouchPhase::End, 40.0, 40.0)));
         all.extend(frame(&mut t, 0.13, vec![]));
         assert_eq!(presses(&all), vec![(PointerButton::Secondary, true), (PointerButton::Secondary, false)]);
+    }
+
+    #[test]
+    fn a_two_finger_tap_leaves_the_pointer_over_what_was_tapped() {
+        let mut t = Touches::default();
+        frame(&mut t, 0.0, finger(0, TouchPhase::Start, 40.0, 40.0));
+        frame(&mut t, 0.02, finger(1, TouchPhase::Start, 90.0, 40.0));
+        frame(&mut t, 0.1, finger(1, TouchPhase::End, 90.0, 40.0));
+        frame(&mut t, 0.12, finger(0, TouchPhase::End, 40.0, 40.0));
+        let release = frame(&mut t, 0.13, vec![]);
+        assert_eq!(presses(&release), vec![(PointerButton::Secondary, false)]);
+        assert!(!release.iter().any(|e| matches!(e, Event::PointerGone)), "the menu's widget is still hovered when the button comes up");
+    }
+
+    #[test]
+    fn a_finger_on_a_grab_area_drags_at_once() {
+        let mut t =
+            Touches { grabs: vec![(egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(200.0, 100.0)), None)], ..Default::default() };
+        let mut raw = RawInput { time: Some(0.0), events: finger(0, TouchPhase::Start, 150.0, 150.0), ..Default::default() };
+        t.process(&mut raw);
+        assert_eq!(presses(&raw.events), vec![(PointerButton::Primary, true)], "no wait for a long press");
+        assert!(raw.events.iter().any(|e| matches!(e, Event::Touch { phase: TouchPhase::Cancel, .. })), "egui's touch ends, so the grid doesn't pan");
+        let moved = frame(&mut t, 0.05, finger(0, TouchPhase::Move, 250.0, 180.0));
+        assert!(moved.iter().any(|e| matches!(e, Event::PointerMoved(p) if p.x == 250.0)));
+        assert_eq!(scrolled(&moved), Vec2::ZERO, "it moves the object, not the sheet");
+        assert_eq!(presses(&frame(&mut t, 0.1, finger(0, TouchPhase::End, 250.0, 180.0))), vec![(PointerButton::Primary, false)]);
+        // Outside the grab areas a finger still scrolls.
+        let mut all = frame(&mut t, 1.0, finger(0, TouchPhase::Start, 20.0, 300.0));
+        all.extend(frame(&mut t, 1.05, finger(0, TouchPhase::Move, 20.0, 250.0)));
+        assert!(presses(&all).is_empty());
+        assert!(scrolled(&all).y < 0.0);
+        // A grab that aims the press (the fill handle) presses there, not under the finger.
+        let mut t = Touches {
+            grabs: vec![(egui::Rect::from_center_size(egui::pos2(50.0, 50.0), egui::vec2(22.0, 22.0)), Some(egui::pos2(50.0, 50.0)))],
+            ..Default::default()
+        };
+        let mut raw = RawInput { time: Some(0.0), events: finger(0, TouchPhase::Start, 58.0, 44.0), ..Default::default() };
+        t.process(&mut raw);
+        assert!(raw.events.iter().any(|e| matches!(e, Event::PointerButton { pos, pressed: true, .. } if *pos == egui::pos2(50.0, 50.0))));
     }
 
     #[test]

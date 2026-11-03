@@ -60,6 +60,9 @@ adb install -r dist/android/GridCraft-*-arm64.apk
 adb logcat -s GridCraft                    # the app's log
 ```
 
+On Windows, `build-apk.ps1` does the same with the SDK's Windows tools (and Git for Windows'
+`patch.exe`): `$env:ANDROID_HOME = "C:\Android\Sdk"; apps\gridcraft-android\build-apk.ps1`.
+
 The first build creates a signing key in `apps/gridcraft-android/keys/` (not committed). Keep
 it: Android installs an update only over a build signed with the same key. `APP_ID` changes the
 package name (default `gridcraft.android`).
@@ -71,6 +74,7 @@ package name (default `gridcraft.android`).
 | `src/lib.rs` | `android_main`, the entry point NativeActivity calls |
 | `src/shell.rs` | storage folders, `Services` (open, save, print, clipboard, links), preferences, the keyboard |
 | `src/workcopies.rs` | working copies of workbooks opened from storage, and writing them back (tested on the desktop) |
+| `src/places.rs` | the name and folder of each file the app opened or saved, for File › Info and Recent (tested on the desktop) |
 | `src/touch.rs` | finger gestures → clicks, scrolling and drag-select (tested on the desktop) |
 | `src/keys.rs` | on-screen keyboard keys → egui keys and modifiers (tested on the desktop) |
 | `src/mailbox.rs` | the inbox the Java side answers through, in order (tested on the desktop) |

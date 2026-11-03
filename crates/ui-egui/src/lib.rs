@@ -267,6 +267,10 @@ pub struct SheetApp {
     pub(crate) capture_geometry_from_raw: bool,
     /// Chart selected on the sheet (id).
     pub selected_chart: Option<u32>,
+    /// Where a finger on a touch screen takes hold at once rather than scrolling the sheet: the
+    /// selected chart or picture and the fill handle (screen points, set as the grid is drawn),
+    /// with where the press lands (`None`: under the finger).
+    pub touch_grabs: Vec<(egui::Rect, Option<egui::Pos2>)>,
     /// The system clipboard's text when GridCraft last copied without publishing to it (a
     /// control-channel or MCP `edit.copy`/`edit.cut`). While the system clipboard still holds this
     /// text, GridCraft's copy is the newer one and Paste uses it.

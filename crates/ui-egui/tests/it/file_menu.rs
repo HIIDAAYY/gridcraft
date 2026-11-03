@@ -647,3 +647,41 @@ fn control_requests_route_to_a_window_and_list_windows() {
     let r = call(&mut h, "engine.execute", serde_json::json!({"command": "cell.get", "params": {"cell": "A1"}, "window": 999}));
     assert_eq!(r["ok"], false, "{r}");
 }
+
+/// Android: a Recent entry that is a document address shows the name and folder the host gives,
+/// and opens through the host (which reads the file again); File › Info names where the workbook
+/// really is rather than its private working copy.
+#[test]
+fn the_host_names_and_opens_recent_documents_and_says_where_the_workbook_is() {
+    const ADDRESS: &str = "content://storage/document/primary%3ADownload%2Fq3.xlsx";
+    let opened = Arc::new(Mutex::new(Vec::<String>::new()));
+    let capture = opened.clone();
+    let mut h = harness(Services {
+        place: Some(Box::new(|key: &str| match key {
+            ADDRESS => Some(("q3.xlsx".into(), "Download".into())),
+            "/private/docs/1/Budget.xlsx" => Some(("Budget.xlsx".into(), "Download/Reports".into())),
+            _ => None,
+        })),
+        open_recent: Some(Box::new(move |entry: &str| {
+            let ours = entry.starts_with("content://");
+            if ours {
+                capture.lock().unwrap().push(entry.to_string());
+            }
+            ours
+        })),
+        ..Default::default()
+    });
+    h.state_mut().ui.recent = vec![ADDRESS.to_string()];
+    h.state_mut().backstage = Some(gridcraft_ui_egui::backstage::Backstage::new(gridcraft_ui_egui::backstage::Page::Open));
+    h.run_steps(3);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "q3.xlsx").click();
+    h.run_steps(3);
+    assert_eq!(*opened.lock().unwrap(), vec![ADDRESS.to_string()], "the host opens it");
+    assert!(h.state().backstage.is_none(), "the workbook arrives later; File closes");
+    // Info: the working copy's path is shown as the file it stands for.
+    h.state_mut().session.active_mut().unwrap().path = Some("/private/docs/1/Budget.xlsx".into());
+    h.state_mut().backstage = Some(gridcraft_ui_egui::backstage::Backstage::new(gridcraft_ui_egui::backstage::Page::Info));
+    h.run_steps(3);
+    assert!(h.query_by_label("Download/Reports/Budget.xlsx").is_some(), "Info says where the workbook is");
+    assert!(h.query_by_label("/private/docs/1/Budget.xlsx").is_none(), "never the private path");
+}

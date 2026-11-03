@@ -84,6 +84,16 @@ pub fn write_back(path: &str, uri: &str) -> Result<(), String> {
     })
 }
 
+/// `openRecent(String uri)`: read the workbook at `uri` again (a Recent entry) into the inbox,
+/// as a pick would.
+pub fn open_recent(uri: &str) -> Result<(), String> {
+    with_activity(|env, activity| {
+        let uri = env.new_string(uri)?;
+        env.call_method(activity, jni_str!("openRecent"), jni_sig!("(Ljava/lang/String;)V"), &[JValue::Object(&uri)])?;
+        Ok(())
+    })
+}
+
 /// `openUrl(String url)`: a web or mail link, in the app the system picks.
 pub fn open_url(url: &str) -> Result<(), String> {
     with_activity(|env, activity| {

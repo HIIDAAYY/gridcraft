@@ -264,13 +264,16 @@ pub struct WheelZoom {
     pub time: f64,
     /// The step the zoom is gliding to, and the percentage set last on the way.
     pub glide: Option<(u16, u16)>,
+    /// Where two fingers pinch (screen): the sheet stays put under them as the zoom changes.
+    pub focus: Option<egui::Pos2>,
 }
 
 impl WheelZoom {
     /// The state for `place` showing `zoom` percent: fresh for another document or sheet, and
     /// without its glide if the zoom was changed some other way since the glide set it.
     fn at(app: &SheetApp, place: (u64, usize), zoom: u16, now: f64) -> WheelZoom {
-        let mut w = app.grid.wheel_zoom.filter(|w| w.place == place).unwrap_or(WheelZoom { place, notches: 0.0, time: now, glide: None });
+        let mut w =
+            app.grid.wheel_zoom.filter(|w| w.place == place).unwrap_or(WheelZoom { place, notches: 0.0, time: now, glide: None, focus: None });
         if w.glide.is_some_and(|(_, shown)| shown != zoom) {
             w.glide = None;
         }

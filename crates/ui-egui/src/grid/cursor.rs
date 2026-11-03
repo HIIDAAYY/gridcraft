@@ -42,6 +42,34 @@ pub(super) fn update_cursor(app: &mut SheetApp, ui: &egui::Ui, resp: &egui::Resp
     hover_cursor(app, ctx, resp, &pointer, geo, sh, p);
 }
 
+/// How far (points) a finger may land from the fill handle and still take it.
+const FINGER_REACH: f32 = 11.0;
+
+/// Where a finger takes hold at once on a touch screen instead of scrolling: the selected object
+/// (to move or resize it) and the fill handle (to fill), as the mouse would take them: (area, where
+/// the press lands; `None`: where the finger is).
+pub(super) fn touch_grabs(app: &SheetApp, geo: &Geo, sh: &Sheet) -> Vec<(Rect, Option<Pos2>)> {
+    let mut grabs = Vec::new();
+    if app.editor.is_some() || app.text_box_editor.is_some() || app.grid.hf_edit.is_some() {
+        return grabs;
+    }
+    if let Some(id) = app.selected_chart
+        && let Some(r) = crate::chartview::object_rect(app, geo, sh, id)
+    {
+        grabs.push((geo.mirror_rect(r.expand(OBJECT_RESIZE_RADIUS)).intersect(geo.cells), None));
+        return grabs;
+    }
+    let sel = app.session.active().map(|d| d.selection.clone()).unwrap_or_default();
+    let corner = geo.range_rect(sh, sel.current()).right_bottom();
+    let in_view = geo.range_panes(RangeRef::cell(sel.current().end)).iter().any(|r| r.expand(1.0).contains(corner));
+    if in_view {
+        let area = geo.mirror_rect(Rect::from_center_size(corner, vec2(FINGER_REACH * 2.0, FINGER_REACH * 2.0))).intersect(geo.cells);
+        // The press lands on the handle itself, so the grid starts a fill rather than a selection.
+        grabs.push((area, Some(geo.mirror_pos(corner))));
+    }
+    grabs
+}
+
 /// The cursor a held drag shows, or `None` when the drag leaves it to hover.
 fn drag_cursor(drag: &Drag) -> Option<CursorIcon> {
     match drag {

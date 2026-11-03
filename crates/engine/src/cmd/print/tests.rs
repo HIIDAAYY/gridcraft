@@ -565,3 +565,24 @@ fn rotated_wrapped_text_prints_rotated() {
     assert_eq!(up + down, blocks.len(), "a header line printed flat: {blocks:?}");
     assert!((1..=3).contains(&up) && (1..=3).contains(&down), "up {up}, down {down}: {blocks:?}");
 }
+
+#[test]
+fn the_print_preview_draws_a_page_as_the_pdf_does() {
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A1", "input": "Region"})).unwrap();
+    s.execute("home.bold", json!({"range": "A1"})).unwrap();
+    s.execute("home.fillColor", json!({"range": "A1", "color": "#FF0000"})).unwrap();
+    s.execute("cell.set", json!({"cell": "A60", "input": "Second page"})).unwrap();
+    let d = s.doc().unwrap();
+    let first = preview_page(&d.wb, &json!({}), 1, "Book1", "").unwrap().unwrap();
+    assert!(first.width > 500.0 && first.height > 700.0);
+    assert!(first.ops.iter().any(|op| matches!(op, PreviewOp::FillRect(_, [255, 0, 0]))), "the fill");
+    assert!(first.ops.iter().any(|op| matches!(op, PreviewOp::Text { text, font, .. } if text == "Region" && font.is_bold())), "bold text");
+    assert!(!first.ops.iter().any(|op| matches!(op, PreviewOp::Text { text, .. } if text == "Second page")), "only page 1");
+    let second = preview_page(&d.wb, &json!({}), 2, "Book1", "").unwrap().unwrap();
+    assert!(second.ops.iter().any(|op| matches!(op, PreviewOp::Text { text, .. } if text == "Second page")));
+    // Past the last page, and a hostile page number: nothing, no panic.
+    assert!(preview_page(&d.wb, &json!({}), 3, "Book1", "").unwrap().is_none());
+    assert!(preview_page(&d.wb, &json!({}), 0, "Book1", "").unwrap().is_none());
+    assert!(preview_page(&d.wb, &json!({}), usize::MAX, "Book1", "").unwrap().is_none());
+}

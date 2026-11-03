@@ -332,3 +332,41 @@ fn cjk_text_is_not_replaced_by_question_marks() -> Result<(), Box<dyn Error>> {
     assert_eq!(text_width(Font::Helvetica, 10.0, "签字"), 20.0);
     Ok(())
 }
+
+#[test]
+fn a_recording_document_keeps_what_each_page_draws() {
+    let mut doc = PdfDoc::recording();
+    let pg = doc.add_page(200.0, 100.0);
+    pg.save();
+    pg.clip_rect(0.0, 0.0, 50.0, 50.0);
+    pg.fill_rect(1.0, 2.0, 3.0, 4.0, [255, 0, 0]);
+    pg.text(10.0, 20.0, 11.0, Font::HelveticaBold, [0, 0, 0], "Total");
+    pg.stroke_line_dashed(Point::new(0.0, 0.0), Point::new(5.0, 0.0), 1.0, [0, 0, 255], &[2.0, 1.0]);
+    pg.image_rgba(Rect::new(0.0, 0.0, 2.0, 1.0), &[1, 2, 3, 4, 5, 6, 7, 8], [2, 1]);
+    pg.restore();
+    // Rejected drawing is not recorded either.
+    pg.fill_rect(f32::NAN, 0.0, 1.0, 1.0, [0, 0, 0]);
+    let ops = doc.page(0).and_then(Page::ops).unwrap().to_vec();
+    assert_eq!(ops.len(), 7);
+    assert_eq!(ops[0], Op::Save);
+    assert_eq!(ops[1], Op::Clip(Rect::new(0.0, 0.0, 50.0, 50.0)));
+    assert_eq!(ops[2], Op::FillRect(Rect::new(1.0, 2.0, 3.0, 4.0), [255, 0, 0]));
+    assert!(matches!(&ops[3], Op::Text { text, font: Font::HelveticaBold, .. } if text == "Total"));
+    assert!(matches!(&ops[4], Op::Polyline { dashed: true, .. }));
+    assert!(matches!(&ops[5], Op::Image { rgba, size: [2, 1], .. } if rgba.len() == 8));
+    assert_eq!(ops[6], Op::Restore);
+    // A document that doesn't record keeps no list.
+    let mut plain = PdfDoc::new();
+    plain.add_page(10.0, 10.0).fill_rect(0.0, 0.0, 1.0, 1.0, [0, 0, 0]);
+    assert!(plain.page(0).and_then(Page::ops).is_none());
+}
+
+#[test]
+fn fonts_say_their_weight_slant_and_family() {
+    assert!(Font::HelveticaBold.is_bold() && !Font::HelveticaBold.is_italic());
+    assert!(Font::TimesBoldItalic.is_bold() && Font::TimesBoldItalic.is_italic());
+    assert!(Font::CourierOblique.is_italic());
+    assert_eq!(Font::TimesRoman.family(), Family::Serif);
+    assert_eq!(Font::CourierBold.family(), Family::Mono);
+    assert_eq!(Font::Helvetica.family(), Family::Sans);
+}

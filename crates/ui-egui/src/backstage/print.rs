@@ -1,3 +1,8 @@
+use std::sync::Arc;
+
+use egui::Color32;
+use gridcraft_engine::cmd::print::{PreviewOp, PreviewPage};
+
 use super::{
     Align2, Backstage, Icon, Json, Outcome, Rect, Sense, SheetApp, Stroke, StrokeKind, Tokens, Ui, dim, json, pos2, square_button, theme, vec2,
 };
@@ -75,8 +80,24 @@ pub(super) fn print(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &m
             p.rect_filled(rect.translate(vec2(2.0, 3.0)), 2.0, t.shadow);
             p.rect_filled(rect, 2.0, t.grid_bg);
             p.rect_stroke(rect, 2.0, Stroke::new(1.0, t.ribbon_border), StrokeKind::Inside);
-            if let Some(d) = app.session.active() {
-                paint_page(p, rect, w, page, &d.wb, &t);
+            let page_key = (uid, revision, bs.print_all, bs.fit_to_page, bs.preview_page);
+            if bs.drawn.as_ref().is_none_or(|(k, _)| *k != page_key)
+                && let Some(d) = app.session.active()
+            {
+                let path = d.path.clone().unwrap_or_default();
+                let drawn = gridcraft_engine::cmd::print::preview_page(&d.wb, &params, bs.preview_page.saturating_add(1), &d.display_title(), &path)
+                    .ok()
+                    .flatten()
+                    .map(Arc::new);
+                bs.drawn = Some((page_key, drawn));
+            }
+            match bs.drawn.as_ref().and_then(|(_, d)| d.clone()) {
+                Some(drawn) => paint_drawn(ui, rect, &drawn, page_key),
+                None => {
+                    if let Some(d) = app.session.active() {
+                        paint_page(p, rect, w, page, &d.wb, &t);
+                    }
+                }
             }
             let sheet = page.get("sheet").and_then(Json::as_str).unwrap_or("");
             let range = page.get("range").and_then(Json::as_str).unwrap_or("");
@@ -98,6 +119,99 @@ pub(super) fn print(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &m
             });
         });
     });
+}
+
+/// Which preview page is drawn: (document, revision, whole workbook, fit to page, page).
+pub(super) type PageKey = (u64, u64, bool, bool, usize);
+
+fn color(c: [u8; 3]) -> Color32 {
+    Color32::from_rgb(c[0], c[1], c[2])
+}
+
+/// Draws a printed page from what the PDF draws on it (fills, borders, fonts, pictures, charts),
+/// scaled into `rect`.
+fn paint_drawn(ui: &Ui, rect: Rect, page: &PreviewPage, key: PageKey) {
+    let k = rect.width() / page.width.max(1.0);
+    let at = |x: f32, y: f32| pos2(rect.left() + x * k, rect.top() + y * k);
+    let area = |r: &gridcraft_engine::cmd::print::PreviewRect| Rect::from_min_size(at(r.x, r.y), vec2(r.width * k, r.height * k));
+    let line = |w: f32| (w * k).max(0.6);
+    // The pictures' textures, made once per drawn page.
+    let id = egui::Id::new(("gridcraft.print_preview_images", key));
+    let textures = ui.ctx().data(|d| d.get_temp::<Arc<Vec<egui::TextureHandle>>>(id)).unwrap_or_else(|| {
+        let made: Vec<egui::TextureHandle> = page
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                PreviewOp::Image { rgba, size, .. } => {
+                    let [w, h] = *size;
+                    let n = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+                    let pixels = rgba.get(..n)?;
+                    let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], pixels);
+                    Some(ui.ctx().load_texture("print-preview-picture", image, egui::TextureOptions::LINEAR))
+                }
+                _ => None,
+            })
+            .collect();
+        let made = Arc::new(made);
+        ui.ctx().data_mut(|d| d.insert_temp(id, made.clone()));
+        made
+    });
+    let mut pictures = textures.iter();
+    let mut clip = rect;
+    let mut saved = Vec::new();
+    for op in &page.ops {
+        let p = ui.painter().with_clip_rect(clip.intersect(ui.clip_rect()));
+        match op {
+            PreviewOp::Save => saved.push(clip),
+            PreviewOp::Restore => clip = saved.pop().unwrap_or(rect),
+            PreviewOp::Clip(r) => clip = clip.intersect(area(r)),
+            PreviewOp::FillRect(r, c) => {
+                p.rect_filled(area(r), 0.0, color(*c));
+            }
+            PreviewOp::StrokeRect(r, w, c) => {
+                p.rect_stroke(area(r), 0.0, Stroke::new(line(*w), color(*c)), StrokeKind::Middle);
+            }
+            PreviewOp::Polyline { points, width, color: c, dashed } => {
+                let pts: Vec<egui::Pos2> = points.iter().map(|q| at(q[0], q[1])).collect();
+                let stroke = Stroke::new(line(*width), color(*c));
+                if *dashed {
+                    p.extend(egui::Shape::dashed_line(&pts, stroke, 3.0, 2.0));
+                } else {
+                    p.add(egui::Shape::line(pts, stroke));
+                }
+            }
+            PreviewOp::Polygon { points, fill, stroke } => {
+                let pts: Vec<egui::Pos2> = points.iter().map(|q| at(q[0], q[1])).collect();
+                let outline = stroke.map_or(Stroke::NONE, |(c, w)| Stroke::new(line(w), color(c)));
+                p.add(egui::Shape::convex_polygon(pts, fill.map_or(Color32::TRANSPARENT, color), outline));
+            }
+            PreviewOp::Circle { center, radius, fill, stroke } => {
+                let c = at(center.x, center.y);
+                if let Some(f) = fill {
+                    p.circle_filled(c, radius * k, color(*f));
+                }
+                if let Some((sc, w)) = stroke {
+                    p.circle_stroke(c, radius * k, Stroke::new(line(*w), color(*sc)));
+                }
+            }
+            PreviewOp::Text { origin, size, font, color: c, text, angle } => {
+                let px = size * k;
+                if px < 1.0 {
+                    continue;
+                }
+                let face = if font.is_bold() { theme::ui_bold(px) } else { theme::ui_font(px) };
+                let galley = p.layout_no_wrap(text.clone(), face, color(*c));
+                // The PDF places the baseline; the galley is placed by its top.
+                let top = at(origin.x, origin.y) - vec2(0.0, px * 0.8);
+                p.add(egui::epaint::TextShape::new(top, galley, color(*c)).with_angle(if angle.is_finite() { *angle } else { 0.0 }));
+            }
+            PreviewOp::Image { rect: r, .. } => {
+                if let Some(t) = pictures.next() {
+                    p.image(t.id(), area(r), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                }
+            }
+        }
+    }
 }
 
 /// Most rows and columns one preview page draws (a page holds far fewer at any readable scale).

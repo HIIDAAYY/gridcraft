@@ -122,6 +122,9 @@ pub struct Backstage {
     preview_page: usize,
     /// Print: the preview for (document, revision, whole workbook, fit to page).
     preview: Option<((u64, u64, bool, bool), Json)>,
+    /// Print: the previewed page as drawn, for (document, revision, whole workbook, fit to page,
+    /// page); `None` inside when it couldn't be drawn.
+    drawn: Option<(print::PageKey, Option<Arc<gridcraft_engine::cmd::print::PreviewPage>>)>,
     /// Save As: the chosen file type (an extension from [`SAVE_TYPES`]).
     pub save_format: &'static str,
     /// Home and Open: when the recent workbooks were last changed.
@@ -142,6 +145,7 @@ impl Backstage {
             fit_to_page: false,
             preview_page: 0,
             preview: None,
+            drawn: None,
             save_format: "xlsx",
             recent: RecentFiles::default(),
         }
@@ -393,7 +397,8 @@ fn recent_list(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Ou
     }
     let now = crate::now_ms() / 1000.0;
     for path in app.ui.recent.iter().take(limit).cloned().collect::<Vec<_>>() {
-        let (name, folder) = split_path(&path);
+        let place = app.services.place.as_ref().and_then(|place| place(&path));
+        let (name, folder) = place.clone().unwrap_or_else(|| split_path(&path));
         let (rect, resp) = ui.allocate_exact_size(vec2(width, 44.0), Sense::click());
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &name));
         let p = ui.painter();
@@ -406,7 +411,8 @@ fn recent_list(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Ou
         let text = p.with_clip_rect(Rect::from_min_max(rect.min, pos2(room, rect.bottom())).intersect(p.clip_rect()));
         text.text(pos2(rect.left() + 42.0, rect.center().y - 8.0), Align2::LEFT_CENTER, &name, theme::ui_font(13.5), t.text);
         text.text(pos2(rect.left() + 42.0, rect.center().y + 9.0), Align2::LEFT_CENTER, &folder, theme::ui_font(11.5), t.text_dim);
-        if modified_w > 0.0 {
+        // A document address (Android) has no file here to ask about.
+        if modified_w > 0.0 && place.is_none() {
             let (words, color) = match known.get(&path) {
                 Some(Modified::At(seconds)) => (age(lang, now - seconds), t.text_dim),
                 Some(Modified::Unknown) => (lang.tr("Not available").to_string(), t.text_disabled),
@@ -414,8 +420,11 @@ fn recent_list(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Ou
             };
             p.text(pos2(rect.right() - modified_w, rect.center().y), Align2::LEFT_CENTER, words, theme::ui_font(12.0), color);
         }
-        let resp = resp.on_hover_text(&path);
-        if resp.clicked() {
+        let resp = resp.on_hover_text(if place.is_some() { format!("{folder}/{name}") } else { path.clone() });
+        if resp.clicked() && app.services.open_recent.as_ref().is_some_and(|open| open(&path)) {
+            // The host reads it and hands the workbook over; it opens on a later frame.
+            out.close = true;
+        } else if resp.clicked() {
             app.open_path(&path);
             if app.session.active().and_then(|d| d.path.as_deref()) == Some(path.as_str()) {
                 out.close = true;
@@ -605,7 +614,12 @@ fn info(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage) {
         return;
     };
     let title = d.display_title();
-    let path = d.path.clone();
+    // Where the workbook is as the user knows it (Android: not its private working copy).
+    let path = d.path.clone().map(|p| match app.services.place.as_ref().and_then(|place| place(&p)) {
+        Some((name, folder)) if folder.is_empty() => name,
+        Some((name, folder)) => format!("{folder}/{name}"),
+        None => p,
+    });
     let sheets = d.wb.sheets.len();
     let protected = d.wb.protected_structure;
     let current: Vec<String> = {

@@ -502,6 +502,22 @@ fn selection_frame(p: &Painter, r: Rect) {
     let _ = Align2::CENTER_CENTER;
 }
 
+/// Where object `id` (a chart, picture, shape or slicer) is on screen, unless objects are hidden.
+pub fn object_rect(app: &SheetApp, geo: &Geo, sh: &Sheet, id: u32) -> Option<Rect> {
+    if app.session.active().is_some_and(|d| objects_hidden(&d.wb)) {
+        return None;
+    }
+    let anchor = sh
+        .charts
+        .iter()
+        .find(|c| c.id == id)
+        .map(|c| &c.anchor)
+        .or_else(|| sh.images.iter().find(|i| i.id == id).map(|i| &i.anchor))
+        .or_else(|| sh.shapes.iter().find(|s| s.id == id).map(|s| &s.anchor))
+        .or_else(|| sh.slicers.iter().find(|s| s.id == id).map(|s| &s.anchor))?;
+    Some(anchor_rect(geo, sh, anchor))
+}
+
 /// The topmost object under `p`: (kind, id, rect).
 pub fn hit(app: &SheetApp, geo: &Geo, sh: &Sheet, p: Pos2) -> Option<(&'static str, u32, Rect)> {
     if app.session.active().is_some_and(|d| objects_hidden(&d.wb)) {

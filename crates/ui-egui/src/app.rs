@@ -69,6 +69,7 @@ impl SheetApp {
             capture_geometry: None,
             capture_geometry_from_raw: false,
             selected_chart: None,
+            touch_grabs: Vec::new(),
             clipboard_text_at_copy: None,
             cut_text: None,
             tab_run: None,

@@ -39,6 +39,8 @@ fn enter_saves_the_sheet_name_and_closes_the_field() {
     h.run_steps(3);
     assert_eq!(h.state().grid.renaming_tab, None, "Enter must close the rename field");
     assert_eq!(sheet_name(&h), "Budget");
+    // The Enter that ended the rename is spent: the active cell stays put (it moved to A2).
+    assert_eq!(h.state().session.active().unwrap().selection.active.a1(), "A1");
 }
 
 #[test]

@@ -12,6 +12,7 @@ use serde_json::json;
 use winit::platform::android::activity::AndroidApp;
 
 use crate::mailbox::{self, Message, Outcome, Purpose};
+use crate::places::Places;
 use crate::workcopies::{Notice, State, WorkCopies};
 use crate::{bridge, keys, touch::Touches};
 
@@ -108,12 +109,23 @@ struct Shell {
     waiting: Rc<Cell<u32>>,
     /// The keyboard as last asked of the activity.
     keyboard: bool,
-    /// Where the last tap or press began, and whether File view was open then.
-    press: Option<(egui::Pos2, bool)>,
-    /// When the last tap ended (seconds, egui's clock) outside File view: a text field that takes
-    /// the keyboard's focus soon after (double-tap on a cell, a tap on the formula bar) shows the
-    /// on-screen keyboard.
-    tapped_at: Option<f64>,
+    /// Where the last tap or press began.
+    press: Option<egui::Pos2>,
+    /// When (seconds, egui's clock) and where the last tap ended: a text field that takes the
+    /// keyboard's focus soon after, under that tap (double-tap on a cell, a tap on the formula
+    /// bar or a box), shows the on-screen keyboard. A field the app focuses by itself (a filter
+    /// menu's search box) doesn't.
+    tapped_at: Option<(f64, egui::Pos2)>,
+    /// Enter or Tab ended a cell's edit: the keyboard stays up for the next cell, as in Excel,
+    /// until a tap elsewhere.
+    entering: bool,
+    /// Whether a cell was being edited in the last frame.
+    cell_editing: bool,
+    /// The ribbon's state before the keyboard came up for typing into cells (the ribbon folds
+    /// away meanwhile, to leave the sheet room above the keyboard).
+    ribbon_before_keyboard: Option<bool>,
+    /// Where workbooks are, in the user's words (File › Info, Recent).
+    places: Rc<RefCell<Places>>,
     /// Messages for the user from the host (a picker that couldn't open).
     messages: Rc<RefCell<Vec<String>>>,
     /// `ui.json` and `prefs.json` as last written.
@@ -143,9 +155,10 @@ impl Shell {
         let waiting = Rc::new(Cell::new(0));
         let messages = Rc::new(RefCell::new(Vec::new()));
         let saves = Rc::new(RefCell::new(Saves::default()));
+        let places = Rc::new(RefCell::new(Places::load(dirs.profile.join("places.json"))));
         let mut session = Session::new();
         session.new_workbook();
-        let services = services(&dirs, inbox.clone(), pictures.clone(), waiting.clone(), messages.clone(), saves.clone());
+        let services = services(&dirs, inbox.clone(), pictures.clone(), waiting.clone(), messages.clone(), saves.clone(), places.clone());
         let mut app = SheetApp::new(session, services);
         // First run: the system's language and light or dark look, until chosen in the app.
         app.ui.language = gridcraft_ui_egui::i18n::Language::system();
@@ -186,6 +199,10 @@ impl Shell {
             keyboard: false,
             press: None,
             tapped_at: None,
+            entering: false,
+            cell_editing: false,
+            ribbon_before_keyboard: None,
+            places,
             messages,
             prefs_written: (stored_ui, stored_prefs),
             insets: None,
@@ -255,6 +272,10 @@ impl Shell {
                 Message::Insets { left, top, right, bottom } => {
                     log::info!("window insets: left {left} top {top} right {right} bottom {bottom}");
                     self.insets = Some(egui::epaint::MarginF32 { left, right, top, bottom });
+                    // The keyboard came up (or went): the cell being typed into stays in sight.
+                    if self.app.editor.is_some() || self.entering {
+                        self.app.grid.ensure_visible = true;
+                    }
                 }
             }
         }
@@ -271,6 +292,7 @@ impl Shell {
             self.inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((name, bytes));
             return;
         };
+        self.remember(&uri, &name);
         // Already open from the same file: show it rather than a second copy.
         if let Some(i) = self.app.session.documents().iter().position(|d| d.path.as_deref().is_some_and(|p| self.copies.uri(p) == Some(uri.as_str())))
         {
@@ -308,6 +330,7 @@ impl Shell {
         match saved {
             Ok(_) => {
                 self.copies.link(&path, uri);
+                self.remember(uri, name);
                 // The workbook's old working copy (and a warning that its file lacked the
                 // changes) is done with: the changes are in the new file.
                 if let Some(old) = old.filter(|p| self.copies.contains(p)) {
@@ -318,6 +341,17 @@ impl Shell {
             Err(e) => log::warn!("{name} saved, but the workbook keeps its old file: {e}"),
         }
         self.app.after_engine();
+    }
+
+    /// A workbook was opened from, or saved to, `uri` as `name`: it heads the Recent list, which
+    /// opens it again from there (the app keeps its permission to).
+    fn remember(&mut self, uri: &str, name: &str) {
+        self.places.borrow_mut().note(uri, name);
+        let recent = &mut self.app.ui.recent;
+        recent.retain(|r| r != uri);
+        recent.insert(0, uri.to_string());
+        recent.truncate(20);
+        self.places.borrow_mut().keep_only(recent);
     }
 
     /// Hand saved working copies to the activity, which writes them over their originals; note
@@ -333,6 +367,12 @@ impl Shell {
             }
         }
         self.open_copies = open.iter().filter(|p| self.copies.contains(p)).cloned().collect();
+        // File › Info names the file a working copy stands for.
+        for path in &self.open_copies {
+            if let Some(uri) = self.copies.uri(path) {
+                self.places.borrow_mut().link(path, uri);
+            }
+        }
         for (path, uri) in self.copies.saved(&open) {
             if let Err(e) = bridge::write_back(&path, &uri) {
                 log::warn!("write back {path}: {e}");
@@ -345,14 +385,19 @@ impl Shell {
                 job.doc = active;
             }
         }
-        // Working copies come and go; Android's own picker (File › Open) lists recent files.
+        // Working copies come and go: Recent lists the files they stand for (`remember`).
         let docs = self.dirs.docs.to_string_lossy().into_owned();
         self.app.ui.recent.retain(|p| !p.starts_with(&docs));
     }
 
     /// Write the preferences when they changed: Android may stop the app without warning.
     fn store_prefs(&mut self) {
-        let (Ok(ui), Ok(prefs)) = (serde_json::to_string(&self.app.ui), serde_json::to_string(&self.app.session.prefs)) else { return };
+        // The ribbon folded away for the keyboard is not the user's choice.
+        let mut state = self.app.ui.clone();
+        if let Some(was) = self.ribbon_before_keyboard {
+            state.ribbon_collapsed = was;
+        }
+        let (Ok(ui), Ok(prefs)) = (serde_json::to_string(&state), serde_json::to_string(&self.app.session.prefs)) else { return };
         for (file, json, written) in [("ui.json", ui, &mut self.prefs_written.0), ("prefs.json", prefs, &mut self.prefs_written.1)] {
             if written.as_deref() == Some(json.as_str()) {
                 continue;
@@ -367,32 +412,40 @@ impl Shell {
     }
 
     /// Show the on-screen keyboard when a text field (the cell being edited, the formula bar, a
-    /// box in a dialog) takes typing right after a tap; put it away when nothing takes typing.
+    /// box in a dialog) takes typing right after a tap on it; keep it up after Enter or Tab ends a
+    /// cell's edit (the next cell takes typing, as in Excel); put it away when nothing takes
+    /// typing. While it is up for cells, the ribbon folds away to leave the sheet room.
     fn keyboard_follows(&mut self, ctx: &egui::Context, typing_area: Option<egui::Rect>, released: bool, now: f64) {
-        if released && let Some((pos, from_file_view)) = self.press.take() {
-            let tapped_field = typing_area.is_some_and(|area| area.expand(8.0).contains(pos));
-            if !from_file_view || tapped_field {
-                self.tapped_at = Some(now);
-            }
+        if released && let Some(pos) = self.press.take() {
+            self.tapped_at = Some((now, pos));
         }
+        let tapped_in = |area: egui::Rect| self.tapped_at.is_some_and(|(t, pos)| now - t < 0.8 && area.expand(8.0).contains(pos));
+        let (moved_on, pressed) = ctx.input(|i| {
+            let moved_on = i.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::Enter | egui::Key::Tab, pressed: true, .. }));
+            (moved_on, i.pointer.any_pressed())
+        });
         match typing_area {
             None => {
-                if self.keyboard {
+                if self.keyboard && self.cell_editing && moved_on && !pressed && self.app.backstage.is_none() {
+                    self.entering = true;
+                } else if self.keyboard && (!self.entering || pressed || self.app.backstage.is_some()) {
                     self.keyboard = false;
+                    self.entering = false;
                     if let Err(e) = bridge::keyboard(false) {
                         log::warn!("keyboard: {e}");
                     }
                 }
             }
-            Some(_) => {
-                let recent = self.tapped_at.is_some_and(|t| now - t < 0.8);
-                if recent && !self.keyboard {
+            Some(area) => {
+                self.entering = false;
+                let tapped = tapped_in(area);
+                if tapped && !self.keyboard {
                     self.keyboard = true;
                     self.tapped_at = None;
                     if let Err(e) = bridge::keyboard(true) {
                         log::warn!("keyboard: {e}");
                     }
-                } else if recent && released {
+                } else if tapped && released {
                     // Tapped again into a field while the keyboard was put away by hand: show it.
                     self.tapped_at = None;
                     if let Err(e) = bridge::keyboard(true) {
@@ -401,7 +454,21 @@ impl Shell {
                 }
             }
         }
-        if self.tapped_at.is_some_and(|t| now - t < 0.8) {
+        self.cell_editing = self.app.editor.is_some();
+        let fold = self.keyboard && (self.cell_editing || self.entering);
+        match (fold, self.ribbon_before_keyboard) {
+            (true, None) => {
+                self.ribbon_before_keyboard = Some(self.app.ui.ribbon_collapsed);
+                self.app.ui.ribbon_collapsed = true;
+                self.app.grid.ensure_visible = true;
+            }
+            (false, Some(was)) => {
+                self.ribbon_before_keyboard = None;
+                self.app.ui.ribbon_collapsed = was;
+            }
+            _ => {}
+        }
+        if self.tapped_at.is_some_and(|(t, _)| now - t < 0.8) {
             // A field may take focus a frame or two after the tap (a double-tap starts editing).
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
@@ -436,6 +503,7 @@ impl eframe::App for Shell {
         }
         // Ctrl+V with nothing on the clipboard pastes nothing (rather than an empty cell).
         raw.events.retain(|e| !matches!(e, egui::Event::Paste(text) if text.is_empty()));
+        self.touches.grabs.clone_from(&self.app.touch_grabs);
         if self.touches.process(raw) {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
@@ -456,7 +524,7 @@ impl eframe::App for Shell {
         let (pressed_at, released, now) =
             ui.ctx().input(|i| (i.pointer.any_pressed().then(|| i.pointer.press_origin()).flatten(), i.pointer.any_released(), i.time));
         if let Some(pos) = pressed_at {
-            self.press = Some((pos, self.app.backstage.is_some()));
+            self.press = Some(pos);
         }
         // Android draws the app under the status bar, the navigation bar and the keyboard: run it
         // in the part of the window they leave free (`content_rect`, from the insets), over the
@@ -565,9 +633,10 @@ fn services(
     waiting: Rc<Cell<u32>>,
     messages: Rc<RefCell<Vec<String>>>,
     saves: Rc<RefCell<Saves>>,
+    places: Rc<RefCell<Places>>,
 ) -> Services {
-    let (open_waiting, picture_waiting) = (waiting.clone(), waiting.clone());
-    let (open_messages, picture_messages, save_messages) = (messages.clone(), messages.clone(), messages.clone());
+    let (open_waiting, picture_waiting, recent_waiting) = (waiting.clone(), waiting.clone(), waiting.clone());
+    let (open_messages, picture_messages, save_messages, recent_messages) = (messages.clone(), messages.clone(), messages.clone(), messages.clone());
     let outbox = dirs.outbox.clone();
     let print_outbox = dirs.outbox.clone();
     let clipboard = dirs.clipboard.clone();
@@ -618,6 +687,20 @@ fn services(
             }
         })),
         inbox: Some(inbox),
+        place: Some(Box::new(move |path: &str| places.borrow().get(path))),
+        open_recent: Some(Box::new(move |entry: &str| {
+            if !entry.starts_with("content://") {
+                return false;
+            }
+            match bridge::open_recent(entry) {
+                Ok(()) => recent_waiting.set(recent_waiting.get().saturating_add(1)),
+                Err(e) => {
+                    log::error!("cannot open {entry}: {e}");
+                    recent_messages.borrow_mut().push(format!("Couldn't open the workbook: {e}"));
+                }
+            }
+            true
+        })),
         ..Default::default()
     }
 }

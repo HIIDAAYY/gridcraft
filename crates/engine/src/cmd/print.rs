@@ -35,6 +35,8 @@ pub use header_footer::{
 /// Decoded pictures (bytes, width, height) keyed by (sheet, picture); `None` = undecodable.
 type PicCache = std::collections::HashMap<(usize, usize), Option<(Vec<u8>, u32, u32)>>;
 
+/// What a [`PreviewPage`] is drawn with.
+pub use gridcraft_pdf::{Font as PreviewFont, Op as PreviewOp, Point as PreviewPoint, Rect as PreviewRect};
 #[cfg(test)]
 use layout::bands;
 pub(crate) use layout::split_bands;
@@ -92,7 +94,34 @@ pub const MAX_PAGES: usize = 2000;
 
 /// Renders laid-out sheets to a PDF.
 pub fn render_pdf(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str) -> (Vec<u8>, usize) {
-    let mut doc = PdfDoc::new();
+    let doc = render_doc(PdfDoc::new(), wb, layouts, file, path, None);
+    let n = doc.page_count();
+    (doc.finish(), n)
+}
+
+/// One printed page as drawn, for an on-screen preview.
+#[derive(Clone, Debug)]
+pub struct PreviewPage {
+    /// The paper's size in points.
+    pub width: f32,
+    pub height: f32,
+    /// What the page draws (points, top-left origin).
+    pub ops: Vec<gridcraft_pdf::Op>,
+}
+
+/// Page `page` (1-based) of what `file.print` would print for `p` (the `file.printPreview`
+/// params), drawn exactly as the PDF draws it: fills, borders, fonts, pictures and charts.
+pub fn preview_page(wb: &Workbook, p: &Json, page: usize, file: &str, path: &str) -> Result<Option<PreviewPage>> {
+    let opts = PrintOptions::from_params(p, "file.printPreview")?;
+    let lays = layouts(wb, &opts);
+    let Some(index) = page.checked_sub(1) else { return Ok(None) };
+    let doc = render_doc(PdfDoc::recording(), wb, &lays, file, path, Some(index));
+    Ok(doc.page(index).map(|pg| PreviewPage { width: pg.width(), height: pg.height(), ops: pg.ops().unwrap_or_default().to_vec() }))
+}
+
+/// Draws the pages into `doc`; with `only`, every page is added but just that one (0-based) is
+/// drawn (a preview needs one page, and the page numbers and links of the rest stay right).
+fn render_doc(mut doc: PdfDoc, wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str, only: Option<usize>) -> PdfDoc {
     doc.info.title = if wb.props.title.is_empty() { file.to_string() } else { wb.props.title.clone() };
     doc.info.author = wb.props.author.clone();
     let total: usize = layouts.iter().map(|l| l.pages.len()).sum();
@@ -119,6 +148,9 @@ pub fn render_pdf(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str
             let oy = lay.margins[2] + if lay.settings.center_v { ((ah - content_h) / 2.0).max(0.0) } else { 0.0 };
             let page_index = doc.page_count();
             let pg = doc.add_page(lay.page_w, lay.page_h);
+            if only.is_some_and(|o| o != page_index) {
+                continue;
+            }
             let mut y = oy + lay.heading_h * k;
             let mut body: Option<Block> = None;
             for (rsi, rs) in rsegs.iter().enumerate() {
@@ -166,8 +198,7 @@ pub fn render_pdf(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str
             page.link_page(Rect::new(lx, ly, w, h), target_page, Point::new(x, y));
         }
     }
-    let n = doc.page_count();
-    (doc.finish(), n)
+    doc
 }
 
 // ---------------------------------------------------------------- commands

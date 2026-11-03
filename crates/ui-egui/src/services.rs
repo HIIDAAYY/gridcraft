@@ -5,6 +5,7 @@ type OpenUrl = Box<dyn Fn(&str)>;
 type CopyHtml = Box<dyn FnMut(&str, &str) -> Result<(), String>>;
 type Download = Box<dyn Fn(&str, &[u8])>;
 type PrintPdf = Box<dyn Fn(&[u8])>;
+type Place = Box<dyn Fn(&str) -> Option<(String, String)>>;
 
 /// Host services the platform shell provides (file pickers, opening URLs).
 #[derive(Default)]
@@ -41,6 +42,13 @@ pub struct Services {
     /// Web: hand PDF bytes to the browser's print flow directly (no download,
     /// no intermediate file) — opens the system print dialog on that PDF.
     pub print: Option<PrintPdf>,
+    /// Android: where a workbook really is, for a path the user never sees (a private working
+    /// copy) or a Recent entry that is a document address: (name, folder) as the user knows
+    /// them. `None` from the host shows the path as it is.
+    pub place: Option<Place>,
+    /// Android: open a Recent entry that is a document address (the host reads it and hands the
+    /// workbook over). `false`: not one of its own; it opens as a path.
+    pub open_recent: Option<Box<dyn Fn(&str) -> bool>>,
 }
 
 /// Shared queue of files read asynchronously (browser file picker, drag and drop).

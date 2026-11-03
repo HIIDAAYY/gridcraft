@@ -221,6 +221,12 @@ pub fn sheet_tabs(app: &mut SheetApp, ui: &mut Ui) {
                                             app.run_or_alert("sheet.rename", json!({"sheet": i, "name": text}));
                                         }
                                         app.grid.renaming_tab = None;
+                                        // The Enter or Escape that ended the rename is spent: the grid,
+                                        // drawn after the tab strip, would otherwise move or act on it.
+                                        ui.input_mut(|i| {
+                                            i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                                            i.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+                                        });
                                     }
                                 } else {
                                     ui.painter().text(r.center(), Align2::CENTER_CENTER, &name, font, if active { t.accent } else { t.text });

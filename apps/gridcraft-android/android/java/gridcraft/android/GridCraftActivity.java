@@ -237,7 +237,60 @@ public class GridCraftActivity extends NativeActivity {
                 toast("Printing is not available on this device.");
                 return;
             }
-            pm.print(name, new PdfAdapter(new File(path), name), new PrintAttributes.Builder().build());
+            File file = new File(path);
+            pm.print(name, new PdfAdapter(file, name), new PrintAttributes.Builder().setMediaSize(paperFor(file)).build());
+        });
+    }
+
+    /** The paper the PDF was laid out on (its first page): Letter, Legal, A4, A3 or A5, turned
+     *  for a landscape page. Another size gets the country's usual paper. */
+    private static PrintAttributes.MediaSize paperFor(File file) {
+        float w = 0f;
+        float h = 0f;
+        try (ParcelFileDescriptor fd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY);
+             android.graphics.pdf.PdfRenderer renderer = new android.graphics.pdf.PdfRenderer(fd)) {
+            if (renderer.getPageCount() > 0) {
+                try (android.graphics.pdf.PdfRenderer.Page page = renderer.openPage(0)) {
+                    w = page.getWidth();
+                    h = page.getHeight();
+                }
+            }
+        } catch (Exception e) {
+            Log.i(TAG, "can't read the page size of " + file + ": " + e.getMessage());
+        }
+        float shortSide = Math.min(w, h);
+        float longSide = Math.max(w, h);
+        PrintAttributes.MediaSize paper;
+        if (near(shortSide, 612f) && near(longSide, 792f)) {
+            paper = PrintAttributes.MediaSize.NA_LETTER;
+        } else if (near(shortSide, 612f) && near(longSide, 1008f)) {
+            paper = PrintAttributes.MediaSize.NA_LEGAL;
+        } else if (near(shortSide, 595f) && near(longSide, 842f)) {
+            paper = PrintAttributes.MediaSize.ISO_A4;
+        } else if (near(shortSide, 842f) && near(longSide, 1191f)) {
+            paper = PrintAttributes.MediaSize.ISO_A3;
+        } else if (near(shortSide, 420f) && near(longSide, 595f)) {
+            paper = PrintAttributes.MediaSize.ISO_A5;
+        } else {
+            String country = Locale.getDefault().getCountry();
+            paper = ("US".equals(country) || "CA".equals(country)) ? PrintAttributes.MediaSize.NA_LETTER : PrintAttributes.MediaSize.ISO_A4;
+        }
+        return w > h ? paper.asLandscape() : paper.asPortrait();
+    }
+
+    private static boolean near(float a, float b) {
+        return Math.abs(a - b) < 4f;
+    }
+
+    /** Open a Recent workbook again from its address (the app kept its permission when it was
+     *  first opened or saved there). */
+    public void openRecent(final String uriText) {
+        io.execute(() -> {
+            Uri uri = Uri.parse(uriText);
+            boolean writable = checkCallingOrSelfUriPermission(uri, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED;
+            deliver(uri, "workbook", writable);
+            post("done", "workbook".getBytes(StandardCharsets.UTF_8));
         });
     }
 
