@@ -136,7 +136,7 @@ fn paint_drawn(ui: &Ui, rect: Rect, page: &PreviewPage, key: PageKey) {
     let area = |r: &gridcraft_engine::cmd::print::PreviewRect| Rect::from_min_size(at(r.x, r.y), vec2(r.width * k, r.height * k));
     let line = |w: f32| (w * k).max(0.6);
     // The pictures' textures, made once per drawn page.
-    let id = egui::Id::new(("gridcraft.print_preview_images", key));
+    let id = egui::Id::unique("gridcraft.print_preview_images").with(key);
     let textures = ui.ctx().data(|d| d.get_temp::<Arc<Vec<egui::TextureHandle>>>(id)).unwrap_or_else(|| {
         let made: Vec<egui::TextureHandle> = page
             .ops
