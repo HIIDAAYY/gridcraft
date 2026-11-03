@@ -682,6 +682,7 @@ fn the_host_names_and_opens_recent_documents_and_says_where_the_workbook_is() {
     h.state_mut().session.active_mut().unwrap().path = Some("/private/docs/1/Budget.xlsx".into());
     h.state_mut().backstage = Some(gridcraft_ui_egui::backstage::Backstage::new(gridcraft_ui_egui::backstage::Page::Info));
     h.run_steps(3);
-    assert!(h.query_by_label("Download/Reports/Budget.xlsx").is_some(), "Info says where the workbook is");
-    assert!(h.query_by_label("/private/docs/1/Budget.xlsx").is_none(), "never the private path");
+    // The heading and the Location row both say it.
+    assert_eq!(h.query_all_by_label("Download/Reports/Budget.xlsx").count(), 2, "Info says where the workbook is");
+    assert_eq!(h.query_all_by_label("/private/docs/1/Budget.xlsx").count(), 0, "never the private path");
 }
