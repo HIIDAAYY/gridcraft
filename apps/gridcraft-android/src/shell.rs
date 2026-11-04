@@ -425,13 +425,7 @@ impl Shell {
         }
         let tapped_in =
             |area: egui::Rect| self.tapped_at.is_some_and(|(t, pos, file_view)| now - t < 0.8 && (!file_view || area.expand(8.0).contains(pos)));
-        let (enter_or_tab, pressed) = ctx.input(|i| {
-            let keys = i.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::Enter | egui::Key::Tab, pressed: true, .. }));
-            (keys, i.pointer.any_pressed())
-        });
-        if enter_or_tab && (self.cell_editing || self.app.editor.is_some()) {
-            self.moved_on = Some(now);
-        }
+        let pressed = ctx.input(|i| i.pointer.any_pressed());
         if pressed {
             self.moved_on = None;
         }
@@ -515,6 +509,11 @@ impl eframe::App for Shell {
         }
         // Ctrl+V with nothing on the clipboard pastes nothing (rather than an empty cell).
         raw.events.retain(|e| !matches!(e, egui::Event::Paste(text) if text.is_empty()));
+        // Enter or Tab while a cell is edited: seen here, before the app takes the key.
+        let enter_or_tab = raw.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::Enter | egui::Key::Tab, pressed: true, .. }));
+        if enter_or_tab && (self.cell_editing || self.app.editor.is_some()) {
+            self.moved_on = Some(raw.time.unwrap_or_else(|| ctx.input(|i| i.time)));
+        }
         self.touches.grabs.clone_from(&self.app.touch_grabs);
         if self.touches.process(raw) {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
