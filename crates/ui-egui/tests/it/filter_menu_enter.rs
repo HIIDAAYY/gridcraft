@@ -112,3 +112,24 @@ fn on_a_touch_screen_the_search_box_waits_for_a_tap() {
     assert!(h.state().grid.filter_menu.is_some(), "the menu opens");
     assert!(!h.ctx.text_edit_focused(), "no text field focused, so no on-screen keyboard over the list");
 }
+
+#[test]
+fn opening_a_tables_filter_menu_changes_nothing() {
+    let mut session = Session::new();
+    session.new_workbook();
+    session.execute("range.setValues", json!({"range": "A1", "values": [["Fruit"], ["Apple"], ["Banana"]]})).unwrap();
+    session.execute("insert.table", json!({"range": "A1:A3"})).unwrap();
+    let mut h = crate::common::builder().with_size(egui::vec2(1200.0, 800.0)).build_ui_state(
+        |ui, app: &mut SheetApp| {
+            app.logic(ui.ctx());
+            app.ui(ui);
+        },
+        crate::common::app(session),
+    );
+    h.run_steps(4);
+    let undo = h.state().session.active().unwrap().undo.len();
+    h.state_mut().grid.filter_menu = Some((0, 0, egui::pos2(300.0, 200.0)));
+    h.run_steps(3);
+    assert!(h.query_by_label("Apple").is_some(), "the menu lists the column's values");
+    assert_eq!(h.state().session.active().unwrap().undo.len(), undo, "opening the menu leaves no undo step");
+}
