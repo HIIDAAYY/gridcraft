@@ -11,23 +11,17 @@ pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_
     let si = wb.active_sheet();
     let Some(sh) = wb.sheet(si) else { return };
     let _ = geo;
-    // Tables get an autofilter on demand.
+    // Tables get an autofilter on demand. Opening the menu changes nothing the user can see, so
+    // it is set in place: no undo step and no unsaved change (it ran `data.filter` twice, leaving
+    // two "Filter" undo steps and a changed workbook behind a menu that was only looked at).
     let table_range = filter_table_range(sh, col, row);
     if sh.autofilter.is_none()
         && let Some(r) = table_range
+        && let Some(d) = app.session.active_mut()
     {
-        let _ = app.session.run("data.filter", json!({"range": r.a1()}));
-        let _ = app.session.run("data.filter", json!({"range": r.a1()}));
-        if let Some(sh2) = app.session.active().and_then(|d| d.wb.active()).map(|s| s.autofilter.is_some())
-            && !sh2
-        {
-            let d = app.session.active_mut();
-            if let Some(d) = d {
-                let wbm = Arc::make_mut(&mut d.wb);
-                if let Some(s) = wbm.sheet_mut(si) {
-                    s.autofilter = Some(gridcraft_engine::model::AutoFilter { range: r, criteria: vec![] });
-                }
-            }
+        let wbm = Arc::make_mut(&mut d.wb);
+        if let Some(s) = wbm.sheet_mut(si) {
+            s.autofilter = Some(gridcraft_engine::model::AutoFilter { range: r, criteria: vec![] });
         }
     }
     let wb = app.session.active().map(|d| d.wb.clone()).unwrap_or(wb);

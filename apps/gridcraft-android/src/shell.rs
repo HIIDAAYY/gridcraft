@@ -116,9 +116,9 @@ struct Shell {
     /// on the formula bar, Rename in a sheet tab's menu) shows the on-screen keyboard. In File
     /// view only a tap on the field itself does (its pages focus fields as they open).
     tapped_at: Option<(f64, egui::Pos2, bool)>,
-    /// Enter or Tab was pressed while a cell was being edited, and the keyboard hasn't been
-    /// settled on since (the edit may end a frame later).
-    moved_on: bool,
+    /// When Enter or Tab was last pressed while a cell was being edited (the edit may end in a
+    /// later frame than the key, or in the same frame after the editor already drew itself).
+    moved_on: Option<f64>,
     /// Enter or Tab ended a cell's edit: the keyboard stays up for the next cell, as in Excel,
     /// until a tap elsewhere.
     entering: bool,
@@ -202,7 +202,7 @@ impl Shell {
             keyboard: false,
             press: None,
             tapped_at: None,
-            moved_on: false,
+            moved_on: None,
             entering: false,
             cell_editing: false,
             ribbon_before_keyboard: None,
@@ -430,15 +430,15 @@ impl Shell {
             (keys, i.pointer.any_pressed())
         });
         if enter_or_tab && (self.cell_editing || self.app.editor.is_some()) {
-            self.moved_on = true;
+            self.moved_on = Some(now);
         }
         if pressed {
-            self.moved_on = false;
+            self.moved_on = None;
         }
         match typing_area {
             None => {
-                if self.keyboard && self.moved_on && self.app.backstage.is_none() {
-                    self.moved_on = false;
+                if self.keyboard && self.moved_on.is_some_and(|t| now - t < 0.5) && self.app.backstage.is_none() {
+                    self.moved_on = None;
                     self.entering = true;
                 } else if self.keyboard && (!self.entering || pressed || self.app.backstage.is_some()) {
                     self.keyboard = false;
@@ -449,9 +449,6 @@ impl Shell {
                 }
             }
             Some(area) => {
-                if self.app.editor.is_none() {
-                    self.moved_on = false;
-                }
                 self.entering = false;
                 let tapped = tapped_in(area);
                 if tapped && !self.keyboard {
