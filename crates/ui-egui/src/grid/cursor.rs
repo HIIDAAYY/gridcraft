@@ -48,6 +48,10 @@ pub(super) fn update_cursor(app: &mut SheetApp, ui: &egui::Ui, resp: &egui::Resp
 /// How far (points) a finger may land from the fill handle and still take it.
 const FINGER_REACH: f32 = 11.0;
 
+/// How far (points) outside the selected object a finger still takes it: as far as its corner
+/// handles reach (`objects::handle_at`).
+const OBJECT_GRAB_REACH: f32 = 10.0;
+
 /// Where a finger takes hold at once on a touch screen instead of scrolling: the selected object
 /// (to move or resize it) and the fill handle (to fill), as the mouse would take them: (area, where
 /// the press lands; `None`: where the finger is).
@@ -60,7 +64,7 @@ pub(super) fn touch_grabs(app: &SheetApp, geo: &Geo, sh: &Sheet) -> Vec<(Rect, O
         && !app.session.active().is_some_and(|d| crate::chartview::objects_hidden(&d.wb))
         && let Some(r) = crate::chartview::object_rect(geo, sh, o)
     {
-        grabs.push((geo.mirror_rect(r.expand(OBJECT_RESIZE_RADIUS)).intersect(geo.cells), None));
+        grabs.push((geo.mirror_rect(r.expand(OBJECT_GRAB_REACH)).intersect(geo.cells), None));
         return grabs;
     }
     let sel = app.session.active().map(|d| d.selection.clone()).unwrap_or_default();
